@@ -49,20 +49,58 @@ const TenantConfigSchema = new mongoose.Schema({
 // Avoid OverwriteModelError
 const TenantConfig = mongoose.models.TenantConfig || mongoose.model('TenantConfig', TenantConfigSchema);
 
-// --- MOCK BAILEYS INITIALIZATION TRIGGER ---
-// Replace this mock with your actual @whiskeysockets/baileys connection logic
+const { makeWASocket, useMultiFileAuthState, DisconnectReason } = require('@whiskeysockets/baileys');
+const pino = require('pino');
+
+// --- ACTUAL BAILEYS INITIALIZATION TRIGGER ---
 async function initializeBaileysSession(tenantId) {
     console.log(`Starting Baileys session engine for tenant: ${tenantId}`);
     
-    // Set status to connecting initially
-    activeSessions.set(tenantId, { status: 'connecting', qr: null });
+    // Use multi file auth state to persist sessions per tenant
+    const { state, saveCreds } = await useMultiFileAuthState(`auth_info_${tenantId}`);
+    
+    const sock = makeWASocket({
+        auth: state,
+        printQRInTerminal: false,
+        logger: pino({ level: 'silent' }) // suppress extreme logs
+    });
+
+    // Set initial status to connecting
+    activeSessions.set(tenantId, { sock, status: 'connecting', qr: null });
     await TenantConfig.findOneAndUpdate({ tenantId }, { botStatus: 'connecting' }, { upsert: true });
 
-    // Simulate generation delay (In real code, hook into connection.update and creds.update)
-    setTimeout(async () => {
-        const mockQrCode = 'mock-qr-code-data-string-' + Math.random().toString(36).substring(2, 10);
-        activeSessions.set(tenantId, { status: 'connecting', qr: mockQrCode });
-    }, 2000);
+    sock.ev.on('creds.update', saveCreds);
+
+    sock.ev.on('connection.update', async (update) => {
+        const { connection, lastDisconnect, qr } = update;
+        
+        let sessionData = activeSessions.get(tenantId);
+        if (!sessionData) return;
+
+        if (qr) {
+            // Live QR code from WhatsApp Web API
+            sessionData.qr = qr;
+            activeSessions.set(tenantId, sessionData);
+        }
+
+        if (connection === 'close') {
+            const shouldReconnect = (lastDisconnect?.error)?.output?.statusCode !== DisconnectReason.loggedOut;
+            console.log(`Connection closed for ${tenantId}. Reconnecting: ${shouldReconnect}`);
+            
+            if (shouldReconnect) {
+                initializeBaileysSession(tenantId);
+            } else {
+                activeSessions.delete(tenantId);
+                await TenantConfig.findOneAndUpdate({ tenantId }, { botStatus: 'disconnected' });
+            }
+        } else if (connection === 'open') {
+            console.log(`Connection opened for ${tenantId}`);
+            sessionData.status = 'connected';
+            sessionData.qr = null;
+            activeSessions.set(tenantId, sessionData);
+            await TenantConfig.findOneAndUpdate({ tenantId }, { botStatus: 'connected' });
+        }
+    });
 }
 
 // --- REST API ENDPOINTS ---
