@@ -44,7 +44,8 @@ const TenantConfigSchema = new mongoose.Schema({
     botStatus: { type: String, enum: ['connected', 'connecting', 'disconnected', 'paused'], default: 'disconnected' },
     engineMode: { type: String, enum: ['ai', 'deterministic'], default: 'ai' },
     aiPrompt: { type: String, default: 'You are a helpful business assistant.' },
-    fallbackMessage: { type: String, default: 'We are currently busy. We will get back to you shortly.' }
+    fallbackMessage: { type: String, default: 'We are currently busy. We will get back to you shortly.' },
+    catalogData: { type: String, default: '' }
 });
 // Avoid OverwriteModelError
 const TenantConfig = mongoose.models.TenantConfig || mongoose.model('TenantConfig', TenantConfigSchema);
@@ -63,11 +64,15 @@ const Groq = require('groq-sdk');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
 
 async function getDualEngineResponse(incomingText, tenantConfig) {
+    const fullPrompt = tenantConfig.catalogData 
+        ? `${tenantConfig.aiPrompt}\n\nBusiness Catalog & Prices:\n${tenantConfig.catalogData}`
+        : tenantConfig.aiPrompt;
+
     try {
         const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
         const chatCompletion = await groq.chat.completions.create({
             messages: [
-                { role: 'system', content: tenantConfig.aiPrompt },
+                { role: 'system', content: fullPrompt },
                 { role: 'user', content: incomingText }
             ],
             model: 'openai/gpt-oss-20b',
@@ -78,7 +83,7 @@ async function getDualEngineResponse(incomingText, tenantConfig) {
             const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
             const model = genAI.getGenerativeModel({ 
                 model: 'gemini-3.1-flash-lite',
-                systemInstruction: tenantConfig.aiPrompt 
+                systemInstruction: fullPrompt 
             });
             const result = await model.generateContent(incomingText);
             const response = await result.response;
@@ -197,7 +202,8 @@ async function initializeBaileysSession(tenantId) {
                                        `*1.* \`/setbiz <business name>\` - Set your business name.\n` +
                                        `*2.* \`/setprompt <your instructions>\` - Set the AI's behavior.\n` +
                                        `*3.* \`/setfallback <your message>\` - Set the fallback message for deterministic mode or AI failures.\n` +
-                                       `*4.* \`/status\` - Check current bot configurations.\n\n` +
+                                       `*4.* \`/setcatalog <items/prices>\` - Provide your catalog to the AI.\n` +
+                                       `*5.* \`/status\` - Check current bot configurations.\n\n` +
                                        `Type any of these commands to get started!`;
                     await sock.sendMessage(userJid, { text: welcomeMsg });
                 }
@@ -267,6 +273,16 @@ async function initializeBaileysSession(tenantId) {
                         config.fallbackMessage = payload;
                         await config.save();
                         await sock.sendMessage(remoteJid, { text: `✅ Fallback message updated to: *${payload}*` }, { quoted: msg });
+                        break;
+
+                    case '/setcatalog':
+                        if (!payload) {
+                            await sock.sendMessage(remoteJid, { text: '❌ Error: Please provide your catalog details.' }, { quoted: msg });
+                            break;
+                        }
+                        config.catalogData = payload;
+                        await config.save();
+                        await sock.sendMessage(remoteJid, { text: `✅ Catalog updated successfully! The AI now knows your products and prices.` }, { quoted: msg });
                         break;
 
                     case '/status':
