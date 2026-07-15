@@ -111,19 +111,44 @@ async function initializeBaileysSession(tenantId) {
         // Ignore own messages and missing text
         if (!msg.message || msg.key.fromMe) return;
 
+        // Extract text depending on message type (text or extended text)
+        const incomingText = msg.message.conversation || msg.message.extendedTextMessage?.text;
+        if (!incomingText) return;
+
         const remoteJid = msg.key.remoteJid;
         // Only respond in direct messages (ignore groups for now)
         if (!remoteJid.endsWith('@s.whatsapp.net')) return;
 
-        console.log(`Received message from ${remoteJid}`);
+        console.log(`Received message from ${remoteJid}: ${incomingText}`);
 
         try {
             // Fetch tenant config to determine the response
             const config = await TenantConfig.findOne({ tenantId });
-            
-            // Simple deterministic response based on config
-            // (You can plug in your Groq AI logic here using config.aiPrompt)
-            const responseText = config?.fallbackMessage || 'We are currently busy. We will get back to you shortly.';
+            let responseText = '';
+
+            if (config?.engineMode === 'ai' && process.env.GROQ_API_KEY) {
+                // Use Groq AI Engine
+                const Groq = require('groq-sdk');
+                const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
+                
+                const systemPrompt = `You are a helpful WhatsApp assistant for an organization named "${config.businessName || 'our company'}". 
+                ${config.aiPrompt || 'Please assist the user kindly and professionally.'}`;
+
+                const chatCompletion = await groq.chat.completions.create({
+                    messages: [
+                        { role: 'system', content: systemPrompt },
+                        { role: 'user', content: incomingText }
+                    ],
+                    model: 'llama3-8b-8192', // or any other groq model
+                    temperature: 0.5,
+                    max_tokens: 150,
+                });
+                
+                responseText = chatCompletion.choices[0]?.message?.content || config.fallbackMessage;
+            } else {
+                // Fallback / Deterministic mode
+                responseText = config?.fallbackMessage || 'We are currently busy. We will get back to you shortly.';
+            }
             
             await sock.readMessages([msg.key]); // Mark as read
             await sock.sendMessage(remoteJid, { text: responseText }, { quoted: msg });
