@@ -120,6 +120,11 @@ async function initializeBaileysSession(tenantId) {
                 initializeBaileysSession(tenantId);
             } else {
                 activeSessions.delete(tenantId);
+                const fs = require('fs');
+                const authPath = `./auth_info_${tenantId}`;
+                if (fs.existsSync(authPath)) {
+                    fs.rmSync(authPath, { recursive: true, force: true });
+                }
                 await TenantConfig.findOneAndUpdate({ tenantId }, { botStatus: 'disconnected' });
             }
         } else if (connection === 'open') {
@@ -271,6 +276,13 @@ app.post('/api/sessions/initiate', async (req, res) => {
         const { tenantId } = req.body;
         if (!tenantId) return res.status(400).json({ error: 'Tenant ID is required' });
 
+        if (activeSessions.has(tenantId)) {
+            const session = activeSessions.get(tenantId);
+            if (session.status === 'connecting' || session.status === 'connected') {
+                return res.json({ success: true, message: 'Session is already active or connecting' });
+            }
+        }
+
         await initializeBaileysSession(tenantId);
         res.json({ success: true, message: 'Session initialization triggered' });
     } catch (error) {
@@ -301,8 +313,14 @@ app.post('/api/sessions/stop', async (req, res) => {
         const { tenantId } = req.body;
         
         if (activeSessions.has(tenantId)) {
-            // In real code: activeSessions.get(tenantId).sock.logout();
+            try { activeSessions.get(tenantId).sock.logout(); } catch (e) {}
             activeSessions.delete(tenantId);
+        }
+
+        const fs = require('fs');
+        const authPath = `./auth_info_${tenantId}`;
+        if (fs.existsSync(authPath)) {
+            fs.rmSync(authPath, { recursive: true, force: true });
         }
 
         await TenantConfig.findOneAndUpdate({ tenantId }, { botStatus: 'disconnected' });
