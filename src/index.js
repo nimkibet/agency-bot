@@ -29,7 +29,7 @@ app.use(cors({
 }));
 
 // Enable pre-flight across-the-board
-app.options('/*', cors());
+// Removed app.options because app.use(cors()) handles it natively and Express 5 throws a PathError on wildcards.
 app.use(express.json());
 
 // In-Memory Session Manager for active Baileys sockets
