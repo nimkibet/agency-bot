@@ -123,7 +123,39 @@ async function initializeBaileysSession(tenantId) {
 
         try {
             // Fetch tenant config to determine the response
-            const config = await TenantConfig.findOne({ tenantId });
+            let config = await TenantConfig.findOne({ tenantId });
+            if (!config) {
+                config = await TenantConfig.create({ tenantId, businessName: `Tenant ${tenantId}` });
+            }
+            
+            // --- IN-CHAT CONFIGURATION COMMANDS ---
+            if (incomingText.startsWith('/setbiz ')) {
+                const newBizName = incomingText.replace('/setbiz ', '').trim();
+                config.businessName = newBizName;
+                await config.save();
+                await sock.readMessages([msg.key]);
+                return await sock.sendMessage(remoteJid, { text: `✅ Business name updated to: *${newBizName}*` }, { quoted: msg });
+            }
+
+            if (incomingText.startsWith('/setprompt ')) {
+                const newPrompt = incomingText.replace('/setprompt ', '').trim();
+                config.aiPrompt = newPrompt;
+                await config.save();
+                await sock.readMessages([msg.key]);
+                return await sock.sendMessage(remoteJid, { text: `✅ AI Prompt updated successfully! Bot is now instructed with your rules.` }, { quoted: msg });
+            }
+
+            if (incomingText.startsWith('/setmode ')) {
+                const newMode = incomingText.replace('/setmode ', '').trim().toLowerCase();
+                if (newMode === 'ai' || newMode === 'deterministic') {
+                    config.engineMode = newMode;
+                    await config.save();
+                    await sock.readMessages([msg.key]);
+                    return await sock.sendMessage(remoteJid, { text: `✅ Engine mode updated to: *${newMode}*` }, { quoted: msg });
+                }
+            }
+            // --- END IN-CHAT CONFIGURATION ---
+
             let responseText = '';
 
             if (config?.engineMode === 'ai' && process.env.GROQ_API_KEY) {
