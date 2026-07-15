@@ -91,7 +91,9 @@ async function initializeBaileysSession(tenantId) {
     const sock = makeWASocket({
         auth: state,
         printQRInTerminal: false,
-        logger: pino({ level: 'silent' }) // suppress extreme logs
+        logger: pino({ level: 'silent' }), // suppress extreme logs
+        syncFullHistory: false, // Skip full history sync to keep it lightweight
+        generateHighQualityLinkPreviews: false // Skip high-res media previews
     });
 
     // Set initial status to connecting
