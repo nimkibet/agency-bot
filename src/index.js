@@ -307,7 +307,7 @@ async function initializeBaileysSession(tenantId) {
             if (msg.key.fromMe) return;
 
             // Only respond in direct messages (ignore normal group messages)
-            if (!remoteJid.endsWith('@s.whatsapp.net')) return;
+            if (!remoteJid.endsWith('@s.whatsapp.net') && !remoteJid.endsWith('@lid')) return;
 
             let responseText = '';
 
