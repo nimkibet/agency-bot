@@ -152,31 +152,52 @@ async function initializeBaileysSession(tenantId) {
             }
             
             // --- IN-CHAT CONFIGURATION COMMANDS ---
-            // Process commands even if they come from the bot owner (Message Yourself)
-            if (incomingText.startsWith('/setbiz ')) {
-                const newBizName = incomingText.replace('/setbiz ', '').trim();
-                config.businessName = newBizName;
-                await config.save();
-                await sock.readMessages([msg.key]);
-                return await sock.sendMessage(remoteJid, { text: `✅ Business name updated to: *${newBizName}*` }, { quoted: msg });
-            }
-
-            if (incomingText.startsWith('/setprompt ')) {
-                const newPrompt = incomingText.replace('/setprompt ', '').trim();
-                config.aiPrompt = newPrompt;
-                await config.save();
-                await sock.readMessages([msg.key]);
-                return await sock.sendMessage(remoteJid, { text: `✅ AI Prompt updated successfully! Bot is now instructed with your rules.` }, { quoted: msg });
-            }
-
-            if (incomingText.startsWith('/setmode ')) {
-                const newMode = incomingText.replace('/setmode ', '').trim().toLowerCase();
-                if (newMode === 'ai' || newMode === 'deterministic') {
-                    config.engineMode = newMode;
-                    await config.save();
-                    await sock.readMessages([msg.key]);
-                    return await sock.sendMessage(remoteJid, { text: `✅ Engine mode updated to: *${newMode}*` }, { quoted: msg });
+            if (incomingText.startsWith('/')) {
+                // Only authorize commands if they originate from the connected WhatsApp account itself
+                if (!msg.key.fromMe) {
+                    await sock.sendMessage(remoteJid, { text: '❌ Error: You are not authorized to use bot configuration commands.' }, { quoted: msg });
+                    return;
                 }
+
+                const [command, ...payloadArr] = incomingText.split(' ');
+                const payload = payloadArr.join(' ').trim();
+
+                switch (command.toLowerCase()) {
+                    case '/setprompt':
+                        if (!payload) {
+                            await sock.sendMessage(remoteJid, { text: '❌ Error: Please provide a prompt payload.' }, { quoted: msg });
+                            break;
+                        }
+                        config.aiPrompt = payload;
+                        await config.save();
+                        await sock.sendMessage(remoteJid, { text: `✅ AI Prompt updated successfully! Bot is now instructed with your rules.` }, { quoted: msg });
+                        break;
+
+                    case '/setfallback':
+                        if (!payload) {
+                            await sock.sendMessage(remoteJid, { text: '❌ Error: Please provide a fallback payload.' }, { quoted: msg });
+                            break;
+                        }
+                        config.fallbackMessage = payload;
+                        await config.save();
+                        await sock.sendMessage(remoteJid, { text: `✅ Fallback message updated to: *${payload}*` }, { quoted: msg });
+                        break;
+
+                    case '/status':
+                        const statusMsg = `📊 *Bot Status*\n\n` +
+                                          `*Tenant ID*: ${config.tenantId}\n` +
+                                          `*Active Engine*: ${config.engineMode === 'ai' ? 'Dual-Engine AI' : 'Deterministic'}\n` +
+                                          `*Current AI Prompt*: ${config.aiPrompt}`;
+                        await sock.sendMessage(remoteJid, { text: statusMsg }, { quoted: msg });
+                        break;
+                    
+                    default:
+                        await sock.sendMessage(remoteJid, { text: `❌ Unknown command: ${command}` }, { quoted: msg });
+                        break;
+                }
+                
+                await sock.readMessages([msg.key]);
+                return; // Execution Bypass
             }
             // --- END IN-CHAT CONFIGURATION ---
 
