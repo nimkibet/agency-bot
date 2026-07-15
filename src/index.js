@@ -194,9 +194,10 @@ async function initializeBaileysSession(tenantId) {
                 if (userJid) {
                     const welcomeMsg = `🎉 *Bot Connected Successfully!*\n\n` +
                                        `Your bot is now live. You can configure it right here using the following commands:\n\n` +
-                                       `*1.* \`/setprompt <your instructions>\` - Set the AI's behavior.\n` +
-                                       `*2.* \`/setfallback <your message>\` - Set the fallback message for deterministic mode or AI failures.\n` +
-                                       `*3.* \`/status\` - Check current bot configurations.\n\n` +
+                                       `*1.* \`/setbiz <business name>\` - Set your business name.\n` +
+                                       `*2.* \`/setprompt <your instructions>\` - Set the AI's behavior.\n` +
+                                       `*3.* \`/setfallback <your message>\` - Set the fallback message for deterministic mode or AI failures.\n` +
+                                       `*4.* \`/status\` - Check current bot configurations.\n\n` +
                                        `Type any of these commands to get started!`;
                     await sock.sendMessage(userJid, { text: welcomeMsg });
                 }
@@ -238,6 +239,16 @@ async function initializeBaileysSession(tenantId) {
                 const payload = payloadArr.join(' ').trim();
 
                 switch (command.toLowerCase()) {
+                    case '/setbiz':
+                        if (!payload) {
+                            await sock.sendMessage(remoteJid, { text: '❌ Error: Please provide a business name.' }, { quoted: msg });
+                            break;
+                        }
+                        config.businessName = payload;
+                        await config.save();
+                        await sock.sendMessage(remoteJid, { text: `✅ Business name updated to: *${payload}*` }, { quoted: msg });
+                        break;
+
                     case '/setprompt':
                         if (!payload) {
                             await sock.sendMessage(remoteJid, { text: '❌ Error: Please provide a prompt payload.' }, { quoted: msg });
