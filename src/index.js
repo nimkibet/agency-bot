@@ -128,6 +128,21 @@ async function initializeBaileysSession(tenantId) {
             sessionData.qr = null;
             activeSessions.set(tenantId, sessionData);
             await TenantConfig.findOneAndUpdate({ tenantId }, { botStatus: 'connected' });
+            
+            try {
+                const userJid = sock.user?.id?.replace(/:\d+/, '');
+                if (userJid) {
+                    const welcomeMsg = `🎉 *Bot Connected Successfully!*\n\n` +
+                                       `Your bot is now live. You can configure it right here using the following commands:\n\n` +
+                                       `*1.* \`/setprompt <your instructions>\` - Set the AI's behavior.\n` +
+                                       `*2.* \`/setfallback <your message>\` - Set the fallback message for deterministic mode or AI failures.\n` +
+                                       `*3.* \`/status\` - Check current bot configurations.\n\n` +
+                                       `Type any of these commands to get started!`;
+                    await sock.sendMessage(userJid, { text: welcomeMsg });
+                }
+            } catch (err) {
+                console.error(`Failed to send welcome message to owner of tenant ${tenantId}:`, err);
+            }
         }
     });
 
