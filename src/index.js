@@ -7,11 +7,29 @@ require('dotenv').config();
 const app = express();
 const PORT = process.env.PORT || 5005;
 
-// Middleware
+// Bulletproof CORS Configuration
+const allowedOrigins = [
+    'https://seek-on.app',
+    'https://www.seek-on.app',
+    'http://localhost:3000',
+    'https://whats-app-one-green.vercel.app'
+];
+
 app.use(cors({
-    origin: ['https://whats-app-one-green.vercel.app', 'http://localhost:3000'],
+    origin: function (origin, callback) {
+        // Allow requests with no origin (like mobile apps or curl requests)
+        if (!origin) return callback(null, true);
+        if (allowedOrigins.indexOf(origin) === -1) {
+            var msg = 'The CORS policy for this site does not allow access from the specified Origin.';
+            return callback(new Error(msg), false);
+        }
+        return callback(null, true);
+    },
     credentials: true
 }));
+
+// Enable pre-flight across-the-board
+app.options('*', cors());
 app.use(express.json());
 
 // In-Memory Session Manager for active Baileys sockets
