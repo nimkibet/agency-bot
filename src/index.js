@@ -29,7 +29,7 @@ app.use(cors({
 }));
 
 // Enable pre-flight across-the-board
-app.options('*', cors());
+app.options('/*', cors());
 app.use(express.json());
 
 // In-Memory Session Manager for active Baileys sockets
