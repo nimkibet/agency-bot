@@ -55,13 +55,13 @@ async function initializeBaileysSession(tenantId) {
     console.log(`Starting Baileys session engine for tenant: ${tenantId}`);
     
     // Set status to connecting initially
-    activeSessions.set(tenantId, { status: 'connecting', pairingCode: null });
+    activeSessions.set(tenantId, { status: 'connecting', qr: null });
     await TenantConfig.findOneAndUpdate({ tenantId }, { botStatus: 'connecting' }, { upsert: true });
 
     // Simulate generation delay (In real code, hook into connection.update and creds.update)
     setTimeout(async () => {
-        const mockPairingCode = Math.random().toString(36).substring(2, 10).toUpperCase();
-        activeSessions.set(tenantId, { status: 'connecting', pairingCode: mockPairingCode });
+        const mockQrCode = 'mock-qr-code-data-string-' + Math.random().toString(36).substring(2, 10);
+        activeSessions.set(tenantId, { status: 'connecting', qr: mockQrCode });
     }, 2000);
 }
 
@@ -81,7 +81,7 @@ app.get('/api/sessions/status/:tenantId', async (req, res) => {
         res.json({
             config,
             liveStatus: liveSession ? liveSession.status : config.botStatus,
-            pairingCode: liveSession ? liveSession.pairingCode : null
+            qr: liveSession ? liveSession.qr : null
         });
     } catch (error) {
         res.status(500).json({ error: error.message });
