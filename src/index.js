@@ -104,9 +104,6 @@ async function initializeBaileysSession(tenantId) {
 
     // Listen for incoming messages and reply
     sock.ev.on('messages.upsert', async (m) => {
-        // Only process new messages
-        if (m.type !== 'notify') return;
-        
         const msg = m.messages[0];
         if (!msg.message) return;
 
