@@ -224,8 +224,8 @@ async function initializeBaileysSession(tenantId) {
             // Ignore normal messages sent by the bot owner to prevent self-looping
             if (msg.key.fromMe) return;
 
-            // Only respond in direct messages or group chats
-            if (!remoteJid.endsWith('@s.whatsapp.net') && !remoteJid.endsWith('@g.us')) return;
+            // Only respond in direct messages (ignore normal group messages)
+            if (!remoteJid.endsWith('@s.whatsapp.net')) return;
 
             let responseText = '';
 
