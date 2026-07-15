@@ -49,7 +49,15 @@ const TenantConfigSchema = new mongoose.Schema({
 // Avoid OverwriteModelError
 const TenantConfig = mongoose.models.TenantConfig || mongoose.model('TenantConfig', TenantConfigSchema);
 
-const { makeWASocket, useMultiFileAuthState, DisconnectReason } = require('@whiskeysockets/baileys');
+const AuthStateSchema = new mongoose.Schema({
+    tenantId: { type: String, required: true, index: true },
+    key: { type: String, required: true },
+    value: { type: String }
+});
+AuthStateSchema.index({ tenantId: 1, key: 1 }, { unique: true });
+const AuthState = mongoose.models.AuthState || mongoose.model('AuthState', AuthStateSchema);
+
+const { makeWASocket, useMultiFileAuthState, DisconnectReason, initAuthCreds, BufferJSON, proto } = require('@whiskeysockets/baileys');
 const pino = require('pino');
 const Groq = require('groq-sdk');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
@@ -81,12 +89,61 @@ async function getDualEngineResponse(incomingText, tenantConfig) {
     }
 }
 
+async function useMongoDBAuthState(tenantId) {
+    const readData = async (key) => {
+        const doc = await AuthState.findOne({ tenantId, key });
+        if (doc && doc.value) return JSON.parse(doc.value, BufferJSON.reviver);
+        return null;
+    };
+    const writeData = async (key, data) => {
+        const value = JSON.stringify(data, BufferJSON.replacer);
+        await AuthState.updateOne({ tenantId, key }, { value }, { upsert: true });
+    };
+    const removeData = async (key) => await AuthState.deleteOne({ tenantId, key });
+
+    const creds = await readData('creds') || initAuthCreds();
+
+    return {
+        state: {
+            creds,
+            keys: {
+                get: async (type, ids) => {
+                    const data = {};
+                    await Promise.all(
+                        ids.map(async id => {
+                            let value = await readData(`${type}-${id}`);
+                            if (type === 'app-state-sync-key' && value) {
+                                value = proto.Message.AppStateSyncKeyData.fromObject(value);
+                            }
+                            data[id] = value;
+                        })
+                    );
+                    return data;
+                },
+                set: async (data) => {
+                    const tasks = [];
+                    for (const category in data) {
+                        for (const id in data[category]) {
+                            const value = data[category][id];
+                            const key = `${category}-${id}`;
+                            if (value) tasks.push(writeData(key, value));
+                            else tasks.push(removeData(key));
+                        }
+                    }
+                    await Promise.all(tasks);
+                }
+            }
+        },
+        saveCreds: () => writeData('creds', creds)
+    };
+}
+
 // --- ACTUAL BAILEYS INITIALIZATION TRIGGER ---
 async function initializeBaileysSession(tenantId) {
     console.log(`Starting Baileys session engine for tenant: ${tenantId}`);
     
-    // Use multi file auth state to persist sessions per tenant
-    const { state, saveCreds } = await useMultiFileAuthState(`auth_info_${tenantId}`);
+    // Use MongoDB auth state to persist sessions per tenant in the database
+    const { state, saveCreds } = await useMongoDBAuthState(tenantId);
     
     const sock = makeWASocket({
         auth: state,
@@ -122,11 +179,7 @@ async function initializeBaileysSession(tenantId) {
                 initializeBaileysSession(tenantId);
             } else {
                 activeSessions.delete(tenantId);
-                const fs = require('fs');
-                const authPath = `./auth_info_${tenantId}`;
-                if (fs.existsSync(authPath)) {
-                    fs.rmSync(authPath, { recursive: true, force: true });
-                }
+                await AuthState.deleteMany({ tenantId });
                 await TenantConfig.findOneAndUpdate({ tenantId }, { botStatus: 'disconnected' });
             }
         } else if (connection === 'open') {
@@ -319,11 +372,7 @@ app.post('/api/sessions/stop', async (req, res) => {
             activeSessions.delete(tenantId);
         }
 
-        const fs = require('fs');
-        const authPath = `./auth_info_${tenantId}`;
-        if (fs.existsSync(authPath)) {
-            fs.rmSync(authPath, { recursive: true, force: true });
-        }
+        await AuthState.deleteMany({ tenantId });
 
         await TenantConfig.findOneAndUpdate({ tenantId }, { botStatus: 'disconnected' });
         res.json({ success: true, message: 'Session stopped successfully' });
