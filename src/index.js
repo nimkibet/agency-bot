@@ -108,17 +108,13 @@ async function initializeBaileysSession(tenantId) {
         if (m.type !== 'notify') return;
         
         const msg = m.messages[0];
-        // Ignore own messages and missing text
-        if (!msg.message || msg.key.fromMe) return;
+        if (!msg.message) return;
 
         // Extract text depending on message type (text or extended text)
         const incomingText = msg.message.conversation || msg.message.extendedTextMessage?.text;
         if (!incomingText) return;
 
         const remoteJid = msg.key.remoteJid;
-        // Only respond in direct messages (ignore groups for now)
-        if (!remoteJid.endsWith('@s.whatsapp.net')) return;
-
         console.log(`Received message from ${remoteJid}: ${incomingText}`);
 
         try {
@@ -129,6 +125,7 @@ async function initializeBaileysSession(tenantId) {
             }
             
             // --- IN-CHAT CONFIGURATION COMMANDS ---
+            // Process commands even if they come from the bot owner (Message Yourself)
             if (incomingText.startsWith('/setbiz ')) {
                 const newBizName = incomingText.replace('/setbiz ', '').trim();
                 config.businessName = newBizName;
@@ -155,6 +152,12 @@ async function initializeBaileysSession(tenantId) {
                 }
             }
             // --- END IN-CHAT CONFIGURATION ---
+
+            // Ignore normal messages sent by the bot owner to prevent self-looping
+            if (msg.key.fromMe) return;
+
+            // Only respond in direct messages (ignore groups for now)
+            if (!remoteJid.endsWith('@s.whatsapp.net')) return;
 
             let responseText = '';
 
