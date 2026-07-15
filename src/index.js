@@ -51,6 +51,35 @@ const TenantConfig = mongoose.models.TenantConfig || mongoose.model('TenantConfi
 
 const { makeWASocket, useMultiFileAuthState, DisconnectReason } = require('@whiskeysockets/baileys');
 const pino = require('pino');
+const Groq = require('groq-sdk');
+const { GoogleGenerativeAI } = require('@google/generative-ai');
+
+async function getDualEngineResponse(incomingText, tenantConfig) {
+    try {
+        const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
+        const chatCompletion = await groq.chat.completions.create({
+            messages: [
+                { role: 'system', content: tenantConfig.aiPrompt },
+                { role: 'user', content: incomingText }
+            ],
+            model: 'openai/gpt-oss-20b',
+        });
+        return chatCompletion.choices[0]?.message?.content;
+    } catch (err) {
+        try {
+            const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+            const model = genAI.getGenerativeModel({ 
+                model: 'gemini-3.1-flash-lite',
+                systemInstruction: tenantConfig.aiPrompt 
+            });
+            const result = await model.generateContent(incomingText);
+            const response = await result.response;
+            return response.text();
+        } catch (fallbackErr) {
+            return tenantConfig.fallbackMessage;
+        }
+    }
+}
 
 // --- ACTUAL BAILEYS INITIALIZATION TRIGGER ---
 async function initializeBaileysSession(tenantId) {
@@ -104,6 +133,7 @@ async function initializeBaileysSession(tenantId) {
 
     // Listen for incoming messages and reply
     sock.ev.on('messages.upsert', async (m) => {
+        if (m.type !== 'notify') return;
         const msg = m.messages[0];
         if (!msg.message) return;
 
@@ -153,37 +183,23 @@ async function initializeBaileysSession(tenantId) {
             // Ignore normal messages sent by the bot owner to prevent self-looping
             if (msg.key.fromMe) return;
 
-            // Only respond in direct messages (ignore groups for now)
-            if (!remoteJid.endsWith('@s.whatsapp.net')) return;
+            // Only respond in direct messages or group chats
+            if (!remoteJid.endsWith('@s.whatsapp.net') && !remoteJid.endsWith('@g.us')) return;
 
             let responseText = '';
 
-            if (config?.engineMode === 'ai' && process.env.GROQ_API_KEY) {
-                // Use Groq AI Engine
-                const Groq = require('groq-sdk');
-                const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
-                
-                const systemPrompt = `You are a helpful WhatsApp assistant for an organization named "${config.businessName || 'our company'}". 
-                ${config.aiPrompt || 'Please assist the user kindly and professionally.'}`;
-
-                const chatCompletion = await groq.chat.completions.create({
-                    messages: [
-                        { role: 'system', content: systemPrompt },
-                        { role: 'user', content: incomingText }
-                    ],
-                    model: 'llama3-8b-8192', // or any other groq model
-                    temperature: 0.5,
-                    max_tokens: 150,
-                });
-                
-                responseText = chatCompletion.choices[0]?.message?.content || config.fallbackMessage;
+            if (config?.engineMode === 'ai') {
+                await sock.sendPresenceUpdate('composing', remoteJid);
+                responseText = await getDualEngineResponse(incomingText, config);
             } else {
                 // Fallback / Deterministic mode
                 responseText = config?.fallbackMessage || 'We are currently busy. We will get back to you shortly.';
             }
             
             await sock.readMessages([msg.key]); // Mark as read
-            await sock.sendMessage(remoteJid, { text: responseText }, { quoted: msg });
+            if (responseText && responseText.trim() !== '') {
+                await sock.sendMessage(remoteJid, { text: responseText }, { quoted: msg });
+            }
         } catch (err) {
             console.error('Error handling incoming message:', err);
         }
