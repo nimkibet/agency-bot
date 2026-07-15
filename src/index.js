@@ -101,6 +101,36 @@ async function initializeBaileysSession(tenantId) {
             await TenantConfig.findOneAndUpdate({ tenantId }, { botStatus: 'connected' });
         }
     });
+
+    // Listen for incoming messages and reply
+    sock.ev.on('messages.upsert', async (m) => {
+        // Only process new messages
+        if (m.type !== 'notify') return;
+        
+        const msg = m.messages[0];
+        // Ignore own messages and missing text
+        if (!msg.message || msg.key.fromMe) return;
+
+        const remoteJid = msg.key.remoteJid;
+        // Only respond in direct messages (ignore groups for now)
+        if (!remoteJid.endsWith('@s.whatsapp.net')) return;
+
+        console.log(`Received message from ${remoteJid}`);
+
+        try {
+            // Fetch tenant config to determine the response
+            const config = await TenantConfig.findOne({ tenantId });
+            
+            // Simple deterministic response based on config
+            // (You can plug in your Groq AI logic here using config.aiPrompt)
+            const responseText = config?.fallbackMessage || 'We are currently busy. We will get back to you shortly.';
+            
+            await sock.readMessages([msg.key]); // Mark as read
+            await sock.sendMessage(remoteJid, { text: responseText }, { quoted: msg });
+        } catch (err) {
+            console.error('Error handling incoming message:', err);
+        }
+    });
 }
 
 // --- REST API ENDPOINTS ---
