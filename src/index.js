@@ -2,6 +2,7 @@
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
+const https = require('https');
 require('dotenv').config();
 
 const app = express();
@@ -12,12 +13,12 @@ const allowedOrigins = [
     'https://seek-on.app',
     'https://www.seek-on.app',
     'http://localhost:3000',
+    'http://localhost:3001',
     'https://whats-app-one-green.vercel.app'
 ];
 
 app.use(cors({
     origin: function (origin, callback) {
-        // Allow requests with no origin (like mobile apps or curl requests)
         if (!origin) return callback(null, true);
         if (allowedOrigins.indexOf(origin) === -1) {
             var msg = 'The CORS policy for this site does not allow access from the specified Origin.';
@@ -28,8 +29,6 @@ app.use(cors({
     credentials: true
 }));
 
-// Enable pre-flight across-the-board
-// Removed app.options because app.use(cors()) handles it natively and Express 5 throws a PathError on wildcards.
 app.use(express.json());
 
 // In-Memory Session Manager for active Baileys sockets
@@ -47,7 +46,6 @@ const TenantConfigSchema = new mongoose.Schema({
     fallbackMessage: { type: String, default: 'We are currently busy. We will get back to you shortly.' },
     catalogData: { type: String, default: '' }
 });
-// Avoid OverwriteModelError
 const TenantConfig = mongoose.models.TenantConfig || mongoose.model('TenantConfig', TenantConfigSchema);
 
 const AuthStateSchema = new mongoose.Schema({
@@ -58,7 +56,8 @@ const AuthStateSchema = new mongoose.Schema({
 AuthStateSchema.index({ tenantId: 1, key: 1 }, { unique: true });
 const AuthState = mongoose.models.AuthState || mongoose.model('AuthState', AuthStateSchema);
 
-const { makeWASocket, useMultiFileAuthState, DisconnectReason, initAuthCreds, BufferJSON, proto } = require('@whiskeysockets/baileys');
+const { makeWASocket, DisconnectReason, initAuthCreds, BufferJSON, proto } = require('@whiskeysockets/baileys');
+const { wrapSocket } = require('baileys-antiban');
 const pino = require('pino');
 const Groq = require('groq-sdk');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
@@ -143,59 +142,113 @@ async function useMongoDBAuthState(tenantId) {
     };
 }
 
-// --- ACTUAL BAILEYS INITIALIZATION TRIGGER ---
-async function initializeBaileysSession(tenantId) {
+// Helper to validate Activation Codes
+function validateActivationCode(code) {
+    if (!code) return false;
+    const clean = code.trim().toUpperCase();
+    const validCodes = ['ACT-1234', 'ACT-5678', 'ACT-9999', 'ACT-ABCD', 'ACT-TENANT'];
+    return validCodes.includes(clean) || /^ACT-[0-9A-Z]{4}$/.test(clean);
+}
+
+// --- BAILEYS SESSION TRIGGER (INTERCEPTED FOR PHONE PAIRING GATEWAY) ---
+async function initializeBaileysSession(tenantId, phoneNumber = null) {
     console.log(`Starting Baileys session engine for tenant: ${tenantId}`);
     
-    // Use MongoDB auth state to persist sessions per tenant in the database
+    // Clear any stale session first if we are initializing a new one
+    if (activeSessions.has(tenantId)) {
+        try {
+            const oldSession = activeSessions.get(tenantId);
+            oldSession.sock.ev.removeAllListeners();
+        } catch (e) {}
+        activeSessions.delete(tenantId);
+    }
+
     const { state, saveCreds } = await useMongoDBAuthState(tenantId);
     
-    const sock = makeWASocket({
+    const rawSock = makeWASocket({
         auth: state,
         printQRInTerminal: false,
-        logger: pino({ level: 'silent' }), // suppress extreme logs
-        syncFullHistory: false, // Skip full history sync to keep it lightweight
-        generateHighQualityLinkPreviews: false // Skip high-res media previews
+        logger: pino({ level: 'silent' }),
+        syncFullHistory: false,
+        generateHighQualityLinkPreviews: false,
+        browser: ["Ubuntu", "Chrome", "20.0.04"]
     });
 
-    // Set initial status to connecting
-    activeSessions.set(tenantId, { sock, status: 'connecting', qr: null });
+    const sock = wrapSocket(rawSock, {
+        sessionStability: { 
+            enabled: true, 
+            healthMonitoring: true 
+        },
+        reconnectThrottle: {
+            enabled: true,
+            rampDurationMs: 60_000 
+        }
+    });
+
+    activeSessions.set(tenantId, { sock, status: 'connecting', pairingCode: null });
     await TenantConfig.findOneAndUpdate({ tenantId }, { botStatus: 'connecting' }, { upsert: true });
 
     sock.ev.on('creds.update', saveCreds);
 
+    // Intercept flow for requestPairingCode(phoneNumber)
+    if (phoneNumber && !sock.authState.creds.registered) {
+        setTimeout(async () => {
+            try {
+                const cleanPhone = phoneNumber.replace(/[^0-9]/g, '');
+                console.log(`Requesting pairing code for ${cleanPhone} on tenant ${tenantId}`);
+                let code;
+                if (typeof sock.requestPairingCode === 'function') {
+                    code = await sock.requestPairingCode(cleanPhone);
+                } else {
+                    code = await rawSock.requestPairingCode(cleanPhone);
+                }
+                
+                const session = activeSessions.get(tenantId);
+                if (session) {
+                    session.pairingCode = code;
+                    activeSessions.set(tenantId, session);
+                }
+                
+                await TenantConfig.findOneAndUpdate({ tenantId }, { whatsappNumber: cleanPhone });
+                console.log(`Pairing code successfully generated for ${tenantId}: ${code}`);
+            } catch (err) {
+                console.error(`Failed to request pairing code for tenant ${tenantId}:`, err);
+            }
+        }, 1500); // Small buffer to ensure socket registers with WA servers
+    }
+
     sock.ev.on('connection.update', async (update) => {
-        const { connection, lastDisconnect, qr } = update;
+        const { connection, lastDisconnect } = update;
         
         let sessionData = activeSessions.get(tenantId);
         if (!sessionData) return;
 
-        if (qr) {
-            // Live QR code from WhatsApp Web API
-            sessionData.qr = qr;
-            activeSessions.set(tenantId, sessionData);
-        }
-
         if (connection === 'close') {
-            const shouldReconnect = (lastDisconnect?.error)?.output?.statusCode !== DisconnectReason.loggedOut;
-            console.log(`Connection closed for ${tenantId}. Reconnecting: ${shouldReconnect}`);
+            const statusCode = (lastDisconnect?.error)?.output?.statusCode;
+            const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
+            console.log(`Connection closed for ${tenantId}. Status: ${statusCode}. Reconnecting: ${shouldReconnect}`);
             
             if (shouldReconnect) {
                 initializeBaileysSession(tenantId);
             } else {
+                // Permanent Logout - Rigorous database teardown to prevent orphaned data
+                console.log(`Rigorous database cleanup on logout for tenant: ${tenantId}`);
                 activeSessions.delete(tenantId);
-                await AuthState.deleteMany({ tenantId });
-                await TenantConfig.findOneAndUpdate({ tenantId }, { botStatus: 'disconnected' });
+                const deletedAuth = await AuthState.deleteMany({ tenantId });
+                const deletedConfig = await TenantConfig.deleteOne({ tenantId });
+                console.log(`Cleanup summary for ${tenantId}: AuthState deleted: ${deletedAuth.deletedCount}, TenantConfig deleted: ${deletedConfig.deletedCount}`);
             }
         } else if (connection === 'open') {
-            console.log(`Connection opened for ${tenantId}`);
+            console.log(`Connection opened successfully for ${tenantId}`);
             sessionData.status = 'connected';
-            sessionData.qr = null;
+            sessionData.pairingCode = null;
             activeSessions.set(tenantId, sessionData);
-            await TenantConfig.findOneAndUpdate({ tenantId }, { botStatus: 'connected' });
+            
+            const userJid = sock.user?.id?.replace(/:\d+/, '');
+            const cleanNumber = userJid ? userJid.split('@')[0] : null;
+            await TenantConfig.findOneAndUpdate({ tenantId }, { botStatus: 'connected', whatsappNumber: cleanNumber });
             
             try {
-                const userJid = sock.user?.id?.replace(/:\d+/, '');
                 if (userJid) {
                     const welcomeMsg = `🎉 *Bot Connected Successfully!*\n\n` +
                                        `Your bot is now live. You can configure it right here using the following commands:\n\n` +
@@ -213,29 +266,21 @@ async function initializeBaileysSession(tenantId) {
         }
     });
 
-    // Listen for incoming messages and reply
     sock.ev.on('messages.upsert', async (m) => {
         if (m.type !== 'notify') return;
         const msg = m.messages[0];
         if (!msg.message) return;
 
-        // Extract text depending on message type (text or extended text)
         const incomingText = msg.message.conversation || msg.message.extendedTextMessage?.text;
         if (!incomingText) return;
 
         const remoteJid = msg.key.remoteJid;
-        console.log(`Received message from ${remoteJid}: ${incomingText}`);
 
         try {
-            // Fetch tenant config to determine the response
             let config = await TenantConfig.findOne({ tenantId });
-            if (!config) {
-                config = await TenantConfig.create({ tenantId, businessName: `Tenant ${tenantId}` });
-            }
+            if (!config) return; // Ignore if config was wiped
             
-            // --- IN-CHAT CONFIGURATION COMMANDS ---
             if (incomingText.startsWith('/')) {
-                // Only authorize commands if they originate from the connected WhatsApp account itself
                 if (!msg.key.fromMe) {
                     await sock.sendMessage(remoteJid, { text: '❌ Error: You are not authorized to use bot configuration commands.' }, { quoted: msg });
                     return;
@@ -299,14 +344,10 @@ async function initializeBaileysSession(tenantId) {
                 }
                 
                 await sock.readMessages([msg.key]);
-                return; // Execution Bypass
+                return;
             }
-            // --- END IN-CHAT CONFIGURATION ---
 
-            // Ignore normal messages sent by the bot owner to prevent self-looping
             if (msg.key.fromMe) return;
-
-            // Only respond in direct messages (ignore normal group messages)
             if (!remoteJid.endsWith('@s.whatsapp.net') && !remoteJid.endsWith('@lid')) return;
 
             let responseText = '';
@@ -315,11 +356,10 @@ async function initializeBaileysSession(tenantId) {
                 await sock.sendPresenceUpdate('composing', remoteJid);
                 responseText = await getDualEngineResponse(incomingText, config);
             } else {
-                // Fallback / Deterministic mode
                 responseText = config?.fallbackMessage || 'We are currently busy. We will get back to you shortly.';
             }
             
-            await sock.readMessages([msg.key]); // Mark as read
+            await sock.readMessages([msg.key]);
             if (responseText && responseText.trim() !== '') {
                 await sock.sendMessage(remoteJid, { text: responseText }, { quoted: msg });
             }
@@ -345,7 +385,7 @@ app.get('/api/sessions/status/:tenantId', async (req, res) => {
         res.json({
             config,
             liveStatus: liveSession ? liveSession.status : config.botStatus,
-            qr: liveSession ? liveSession.qr : null
+            pairingCode: liveSession ? liveSession.pairingCode : null
         });
     } catch (error) {
         res.status(500).json({ error: error.message });
@@ -355,18 +395,26 @@ app.get('/api/sessions/status/:tenantId', async (req, res) => {
 // 2. Initiate WhatsApp Connection Link
 app.post('/api/sessions/initiate', async (req, res) => {
     try {
-        const { tenantId } = req.body;
+        const { tenantId, phoneNumber, activationCode } = req.body;
         if (!tenantId) return res.status(400).json({ error: 'Tenant ID is required' });
+        if (!phoneNumber) return res.status(400).json({ error: 'Phone number is required' });
+        if (!activationCode) return res.status(400).json({ error: 'Activation code is required' });
 
-        if (activeSessions.has(tenantId)) {
-            const session = activeSessions.get(tenantId);
-            if (session.status === 'connecting' || session.status === 'connected') {
-                return res.json({ success: true, message: 'Session is already active or connecting' });
-            }
+        if (!validateActivationCode(activationCode)) {
+            return res.status(400).json({ error: 'Invalid Activation Code. Expected format: ACT-XXXX' });
         }
 
-        await initializeBaileysSession(tenantId);
-        res.json({ success: true, message: 'Session initialization triggered' });
+        if (activeSessions.has(tenantId)) {
+            try { 
+                const session = activeSessions.get(tenantId);
+                session.sock.ev.removeAllListeners();
+                session.sock.logout(); 
+            } catch (e) {}
+            activeSessions.delete(tenantId);
+        }
+
+        await initializeBaileysSession(tenantId, phoneNumber);
+        res.json({ success: true, message: 'Session initialization triggered. Requesting pairing code.' });
     } catch (error) {
         res.status(500).json({ error: error.message });
     }
@@ -389,28 +437,65 @@ app.post('/api/config/update-prompt', async (req, res) => {
     }
 });
 
-// 4. Terminate / Stop Bot Session
+// 4. Terminate / Stop Bot Session & Purge Database Configurations (Rigorous Teardown)
 app.post('/api/sessions/stop', async (req, res) => {
     try {
         const { tenantId } = req.body;
         
         if (activeSessions.has(tenantId)) {
-            try { activeSessions.get(tenantId).sock.logout(); } catch (e) {}
+            try { 
+                const session = activeSessions.get(tenantId);
+                session.sock.ev.removeAllListeners();
+                session.sock.logout(); 
+            } catch (e) {}
             activeSessions.delete(tenantId);
         }
 
-        await AuthState.deleteMany({ tenantId });
+        // Wipe AuthState and TenantConfig permanently to prevent orphaned config
+        console.log(`Rigorous database cleanup on explicit stop for tenant: ${tenantId}`);
+        const deletedAuth = await AuthState.deleteMany({ tenantId });
+        const deletedConfig = await TenantConfig.deleteOne({ tenantId });
+        console.log(`Purge summary: AuthState deleted docs: ${deletedAuth.deletedCount}, TenantConfig deleted docs: ${deletedConfig.deletedCount}`);
 
-        await TenantConfig.findOneAndUpdate({ tenantId }, { botStatus: 'disconnected' });
-        res.json({ success: true, message: 'Session stopped successfully' });
+        res.json({ success: true, message: 'Session terminated and configurations purged successfully.' });
     } catch (error) {
         res.status(500).json({ error: error.message });
     }
 });
 
-// Database and Server Connect
-mongoose.connect(process.env.MONGO_URI || 'mongodb://127.0.0.1:27017/agency-os')
+// --- API KEEP-ALIVE MONITOR ---
+// Lightweight background interval to ping Groq and Gemini every 5 minutes to keep pools warm
+setInterval(() => {
+    console.log('[Keep-Alive Monitor] Routine ping to external AI endpoints...');
+    
+    // Ping Groq API endpoint
+    https.get('https://api.groq.com/openai/v1/models', {
+        headers: { 'Authorization': `Bearer ${process.env.GROQ_API_KEY || ''}` }
+    }, (res) => {
+        console.log(`[Keep-Alive Monitor] Groq Ping status: ${res.statusCode}`);
+    }).on('error', (err) => {
+        console.error('[Keep-Alive Monitor] Groq Ping error:', err.message);
+    });
+
+    // Ping Gemini API endpoint
+    https.get(`https://generativelanguage.googleapis.com/v1beta/models?key=${process.env.GEMINI_API_KEY || ''}`, (res) => {
+        console.log(`[Keep-Alive Monitor] Gemini Ping status: ${res.statusCode}`);
+    }).on('error', (err) => {
+        console.error('[Keep-Alive Monitor] Gemini Ping error:', err.message);
+    });
+}, 5 * 60 * 1000); // 5 minutes
+
+// Database and Server Connect (Supporting both MONGODB_URI and MONGO_URI with placeholder fallback)
+let dbUri = process.env.MONGODB_URI || process.env.MONGO_URI || 'mongodb://127.0.0.1:27017/agency-os';
+if (dbUri.includes('<db_username>')) {
+    console.log('[Database] MONGODB_URI placeholder detected. Falling back to local MongoDB.');
+    dbUri = 'mongodb://127.0.0.1:27017/agency-os';
+}
+mongoose.connect(dbUri)
     .then(() => {
-        app.listen(PORT, () => console.log(`Agency API engine actively running on port ${PORT}`));
+        app.listen(PORT, () => {
+            console.log(`Agency API engine actively running on port ${PORT}`);
+            console.log(`Connected to Database: ${dbUri.substring(0, dbUri.indexOf('@') > -1 ? dbUri.indexOf('@') : 30)}...`);
+        });
     })
     .catch(err => console.error('Database connection crash:', err));
