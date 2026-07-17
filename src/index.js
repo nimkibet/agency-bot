@@ -95,7 +95,7 @@ async function getDualEngineResponse(incomingText, tenantConfig) {
                 { role: 'system', content: fullPrompt },
                 { role: 'user', content: incomingText }
             ],
-            model: 'openai/gpt-oss-20b',
+            model: 'llama-3.3-70b-versatile',
         });
         return chatCompletion.choices[0]?.message?.content;
     } catch (err) {
