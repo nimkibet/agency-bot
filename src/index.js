@@ -67,7 +67,9 @@ const ChatSessionSchema = new mongoose.Schema({
     tenantId: { type: String, required: true },
     chatJid: { type: String, required: true },
     category: { type: String, enum: ['undetermined', 'business', 'personal'], default: 'undetermined' },
-    greeted: { type: Boolean, default: false }
+    greeted: { type: Boolean, default: false },
+    lastUserMessageText: { type: String, default: '' },
+    lastUserMessageKey: { type: String, default: '' }
 });
 ChatSessionSchema.index({ tenantId: 1, chatJid: 1 }, { unique: true });
 const ChatSession = mongoose.models.ChatSession || mongoose.model('ChatSession', ChatSessionSchema);
@@ -332,7 +334,37 @@ async function initializeBaileysSession(tenantId, phoneNumber = null) {
                     return;
                 } else if (incomingText === '..') {
                     await PausedChat.deleteOne({ tenantId, chatJid: remoteJid });
-                    await sock.sendMessage(remoteJid, { text: '▶️ AI agent resumed for this chat.' });
+                    
+                    const session = await ChatSession.findOne({ tenantId, chatJid: remoteJid });
+                    if (session && session.lastUserMessageText) {
+                        const lastText = session.lastUserMessageText;
+                        const lastKeyJson = session.lastUserMessageKey;
+                        
+                        session.lastUserMessageText = '';
+                        session.lastUserMessageKey = '';
+                        await session.save();
+
+                        let responseText = '';
+                        if (config?.engineMode === 'ai') {
+                            await sock.sendPresenceUpdate('composing', remoteJid);
+                            responseText = await getDualEngineResponse(lastText, config);
+                        } else {
+                            responseText = config?.fallbackMessage || 'We are currently busy. We will get back to you shortly.';
+                        }
+
+                        if (responseText && responseText.trim() !== '') {
+                            const formattedResponse = responseText.replace(/\*\*/g, '*');
+                            let quotedMsg = null;
+                            try {
+                                if (lastKeyJson) {
+                                    quotedMsg = { key: JSON.parse(lastKeyJson) };
+                                }
+                            } catch (e) {}
+                            await sock.sendMessage(remoteJid, { text: formattedResponse }, { quoted: quotedMsg });
+                        }
+                    } else {
+                        await sock.sendMessage(remoteJid, { text: '▶️ AI agent resumed for this chat.' });
+                    }
                     await sock.readMessages([msg.key]);
                     return;
                 }
@@ -403,6 +435,22 @@ async function initializeBaileysSession(tenantId, phoneNumber = null) {
 
             // 3. Check User (Client) Controls (/stop, /start, /resume)
             if (!msg.key.fromMe) {
+                // Ensure a ChatSession exists and track this incoming message
+                let session = await ChatSession.findOne({ tenantId, chatJid: remoteJid });
+                if (!session) {
+                    session = await ChatSession.create({ 
+                        tenantId, 
+                        chatJid: remoteJid, 
+                        category: 'undetermined',
+                        lastUserMessageText: incomingText,
+                        lastUserMessageKey: JSON.stringify(msg.key)
+                    });
+                } else {
+                    session.lastUserMessageText = incomingText;
+                    session.lastUserMessageKey = JSON.stringify(msg.key);
+                    await session.save();
+                }
+
                 const lowerText = incomingText.toLowerCase();
                 if (lowerText === '/stop') {
                     await PausedChat.findOneAndUpdate(
@@ -410,11 +458,23 @@ async function initializeBaileysSession(tenantId, phoneNumber = null) {
                         { tenantId, chatJid: remoteJid },
                         { upsert: true }
                     );
+                    
+                    // Clear the message tracking fields since it was a control command
+                    session.lastUserMessageText = '';
+                    session.lastUserMessageKey = '';
+                    await session.save();
+
                     await sock.sendMessage(remoteJid, { text: '⏸️ The AI agent has been stopped for this discussion. You or the bot owner can explicitly resume it.' }, { quoted: msg });
                     await sock.readMessages([msg.key]);
                     return;
                 } else if (lowerText === '/start' || lowerText === '/resume') {
                     await PausedChat.deleteOne({ tenantId, chatJid: remoteJid });
+                    
+                    // Clear message tracking fields since it was a control command
+                    session.lastUserMessageText = '';
+                    session.lastUserMessageKey = '';
+                    await session.save();
+
                     await sock.sendMessage(remoteJid, { text: '▶️ The AI agent has resumed.' }, { quoted: msg });
                     await sock.readMessages([msg.key]);
                     return;
@@ -428,28 +488,33 @@ async function initializeBaileysSession(tenantId, phoneNumber = null) {
                 }
 
                 // 5. Manage Chat Categorization (Business vs Personal)
-                let session = await ChatSession.findOne({ tenantId, chatJid: remoteJid });
-                if (!session) {
-                    session = await ChatSession.create({ tenantId, chatJid: remoteJid, category: 'undetermined' });
-                }
-
                 if (session.category === 'undetermined') {
                     const lowerInput = incomingText.toLowerCase();
                     if (lowerInput === '1' || lowerInput.includes('business')) {
-                        await ChatSession.updateOne({ tenantId, chatJid: remoteJid }, { category: 'business', greeted: true });
+                        await ChatSession.updateOne(
+                            { tenantId, chatJid: remoteJid }, 
+                            { category: 'business', greeted: true, lastUserMessageText: '', lastUserMessageKey: '' }
+                        );
                         const displayName = config.businessName || 'AgencyOS';
                         const confirmMsg = `Hi, I am ${displayName} AI agent, I can help you with. How can I help you today?\n\n(Note: You can send /stop at any time to stop this AI agent from continuing this discussion)`;
                         await sock.sendMessage(remoteJid, { text: confirmMsg }, { quoted: msg });
                         await sock.readMessages([msg.key]);
                         return;
                     } else if (lowerInput === '2' || lowerInput.includes('personal')) {
-                        await ChatSession.updateOne({ tenantId, chatJid: remoteJid }, { category: 'personal' });
+                        await ChatSession.updateOne(
+                            { tenantId, chatJid: remoteJid }, 
+                            { category: 'personal', lastUserMessageText: '', lastUserMessageKey: '' }
+                        );
                         const busyMsg = `This is a personal chat. I am currently busy, but I will get back to you shortly.`;
                         await sock.sendMessage(remoteJid, { text: busyMsg }, { quoted: msg });
                         await sock.readMessages([msg.key]);
                         return;
                     } else {
                         // Resend the choice prompt
+                        session.lastUserMessageText = '';
+                        session.lastUserMessageKey = '';
+                        await session.save();
+
                         const displayName = config.businessName || 'AgencyOS';
                         const selectMsg = `Hi, I am ${displayName} AI agent. 🤖\n\nIs this a business or personal conversation? Please reply with:\n*1* - Business\n*2* - Personal`;
                         await sock.sendMessage(remoteJid, { text: selectMsg }, { quoted: msg });
@@ -478,6 +543,12 @@ async function initializeBaileysSession(tenantId, phoneNumber = null) {
                 // Convert double asterisks to single asterisks for proper WhatsApp bolding
                 const formattedResponse = responseText.replace(/\*\*/g, '*');
                 await sock.sendMessage(remoteJid, { text: formattedResponse }, { quoted: msg });
+                
+                // Clear user message tracker since response was delivered
+                await ChatSession.updateOne(
+                    { tenantId, chatJid: remoteJid }, 
+                    { lastUserMessageText: '', lastUserMessageKey: '' }
+                );
             }
         } catch (err) {
             console.error('Error handling incoming message:', err);
