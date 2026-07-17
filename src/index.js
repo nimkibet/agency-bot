@@ -56,6 +56,22 @@ const AuthStateSchema = new mongoose.Schema({
 AuthStateSchema.index({ tenantId: 1, key: 1 }, { unique: true });
 const AuthState = mongoose.models.AuthState || mongoose.model('AuthState', AuthStateSchema);
 
+const PausedChatSchema = new mongoose.Schema({
+    tenantId: { type: String, required: true },
+    chatJid: { type: String, required: true }
+});
+PausedChatSchema.index({ tenantId: 1, chatJid: 1 }, { unique: true });
+const PausedChat = mongoose.models.PausedChat || mongoose.model('PausedChat', PausedChatSchema);
+
+const ChatSessionSchema = new mongoose.Schema({
+    tenantId: { type: String, required: true },
+    chatJid: { type: String, required: true },
+    category: { type: String, enum: ['undetermined', 'business', 'personal'], default: 'undetermined' }
+});
+ChatSessionSchema.index({ tenantId: 1, chatJid: 1 }, { unique: true });
+const ChatSession = mongoose.models.ChatSession || mongoose.model('ChatSession', ChatSessionSchema);
+
+
 const { makeWASocket, DisconnectReason, initAuthCreds, BufferJSON, proto } = require('@whiskeysockets/baileys');
 const { wrapSocket } = require('baileys-antiban');
 const pino = require('pino');
@@ -63,9 +79,13 @@ const Groq = require('groq-sdk');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
 
 async function getDualEngineResponse(incomingText, tenantConfig) {
-    const fullPrompt = tenantConfig.catalogData 
+    let fullPrompt = tenantConfig.catalogData 
         ? `${tenantConfig.aiPrompt}\n\nBusiness Catalog & Prices:\n${tenantConfig.catalogData}`
         : tenantConfig.aiPrompt;
+
+    fullPrompt += `\n\nCRITICAL CONSTRAINTS:
+1. You must respond ONLY in English. Do NOT respond in Swahili or any other language under any circumstances. Stick strictly to English.
+2. When presenting lists, prices, options, or data, do NOT use markdown tables or raw charts. Instead, format them as clean, professional bulleted lists (bulletin points) that are easy to read on mobile devices. Ensure they are professionally structured.`;
 
     try {
         const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
@@ -257,6 +277,12 @@ async function initializeBaileysSession(tenantId, phoneNumber = null) {
                                        `*3.* \`/setfallback <your message>\` - Set the fallback message for deterministic mode or AI failures.\n` +
                                        `*4.* \`/setcatalog <items/prices>\` - Provide your catalog to the AI.\n` +
                                        `*5.* \`/status\` - Check current bot configurations.\n\n` +
+                                       `💡 *AI Control Guidelines:*\n` +
+                                       `- Users can send \`/stop\` to stop the AI agent from continuing the discussion.\n` +
+                                       `- Users can send \`/reset\` to choose between Business/Personal again.\n` +
+                                       `- You (the owner) can stop the AI by typing \`.\` in any chat.\n` +
+                                       `- You can prompt the AI to continue/resume by typing \`..\` in that chat.\n` +
+                                       `- You can type \`/reset\` in any chat to reset its categorization.\n\n` +
                                        `Type any of these commands to get started!`;
                     await sock.sendMessage(userJid, { text: welcomeMsg });
                 }
@@ -271,84 +297,170 @@ async function initializeBaileysSession(tenantId, phoneNumber = null) {
         const msg = m.messages[0];
         if (!msg.message) return;
 
-        const incomingText = msg.message.conversation || msg.message.extendedTextMessage?.text;
+        let incomingText = msg.message.conversation || msg.message.extendedTextMessage?.text;
         if (!incomingText) return;
+        incomingText = incomingText.trim();
 
         const remoteJid = msg.key.remoteJid;
+        if (!remoteJid || (!remoteJid.endsWith('@s.whatsapp.net') && !remoteJid.endsWith('@lid'))) return;
 
         try {
             let config = await TenantConfig.findOne({ tenantId });
             if (!config) return; // Ignore if config was wiped
-            
-            if (incomingText.startsWith('/')) {
-                if (!msg.key.fromMe) {
-                    await sock.sendMessage(remoteJid, { text: '❌ Error: You are not authorized to use bot configuration commands.' }, { quoted: msg });
-                    return;
-                }
 
-                const [command, ...payloadArr] = incomingText.split(' ');
-                const payload = payloadArr.join(' ').trim();
-
-                switch (command.toLowerCase()) {
-                    case '/setbiz':
-                        if (!payload) {
-                            await sock.sendMessage(remoteJid, { text: '❌ Error: Please provide a business name.' }, { quoted: msg });
-                            break;
-                        }
-                        config.businessName = payload;
-                        await config.save();
-                        await sock.sendMessage(remoteJid, { text: `✅ Business name updated to: *${payload}*` }, { quoted: msg });
-                        break;
-
-                    case '/setprompt':
-                        if (!payload) {
-                            await sock.sendMessage(remoteJid, { text: '❌ Error: Please provide a prompt payload.' }, { quoted: msg });
-                            break;
-                        }
-                        config.aiPrompt = payload;
-                        await config.save();
-                        await sock.sendMessage(remoteJid, { text: `✅ AI Prompt updated successfully! Bot is now instructed with your rules.` }, { quoted: msg });
-                        break;
-
-                    case '/setfallback':
-                        if (!payload) {
-                            await sock.sendMessage(remoteJid, { text: '❌ Error: Please provide a fallback payload.' }, { quoted: msg });
-                            break;
-                        }
-                        config.fallbackMessage = payload;
-                        await config.save();
-                        await sock.sendMessage(remoteJid, { text: `✅ Fallback message updated to: *${payload}*` }, { quoted: msg });
-                        break;
-
-                    case '/setcatalog':
-                        if (!payload) {
-                            await sock.sendMessage(remoteJid, { text: '❌ Error: Please provide your catalog details.' }, { quoted: msg });
-                            break;
-                        }
-                        config.catalogData = payload;
-                        await config.save();
-                        await sock.sendMessage(remoteJid, { text: `✅ Catalog updated successfully! The AI now knows your products and prices.` }, { quoted: msg });
-                        break;
-
-                    case '/status':
-                        const statusMsg = `📊 *Bot Status*\n\n` +
-                                          `*Tenant ID*: ${config.tenantId}\n` +
-                                          `*Active Engine*: ${config.engineMode === 'ai' ? 'Dual-Engine AI' : 'Deterministic'}\n` +
-                                          `*Current AI Prompt*: ${config.aiPrompt}`;
-                        await sock.sendMessage(remoteJid, { text: statusMsg }, { quoted: msg });
-                        break;
-                    
-                    default:
-                        await sock.sendMessage(remoteJid, { text: `❌ Unknown command: ${command}` }, { quoted: msg });
-                        break;
-                }
-                
+            // 1. Intercept Categorization Reset Command (accessible by both owner and user)
+            if (incomingText.toLowerCase() === '/reset') {
+                await ChatSession.updateOne({ tenantId, chatJid: remoteJid }, { category: 'undetermined' });
+                const displayName = config.businessName || 'AgencyOS';
+                const resetMsg = `🔄 Conversation categorization has been reset. Please select the category:\n*1* - Business\n*2* - Personal`;
+                await sock.sendMessage(remoteJid, { text: resetMsg });
                 await sock.readMessages([msg.key]);
                 return;
             }
 
-            if (msg.key.fromMe) return;
-            if (!remoteJid.endsWith('@s.whatsapp.net') && !remoteJid.endsWith('@lid')) return;
+            // 2. Check Owner Controls (typing . or ..)
+            if (msg.key.fromMe) {
+                if (incomingText === '.') {
+                    await PausedChat.findOneAndUpdate(
+                        { tenantId, chatJid: remoteJid },
+                        { tenantId, chatJid: remoteJid },
+                        { upsert: true }
+                    );
+                    await sock.sendMessage(remoteJid, { text: '⏸️ AI agent paused for this chat. Type `..` to resume.' });
+                    await sock.readMessages([msg.key]);
+                    return;
+                } else if (incomingText === '..') {
+                    await PausedChat.deleteOne({ tenantId, chatJid: remoteJid });
+                    await sock.sendMessage(remoteJid, { text: '▶️ AI agent resumed for this chat.' });
+                    await sock.readMessages([msg.key]);
+                    return;
+                }
+
+                // If it's configuration command starting with '/'
+                if (incomingText.startsWith('/')) {
+                    const [command, ...payloadArr] = incomingText.split(' ');
+                    const payload = payloadArr.join(' ').trim();
+
+                    switch (command.toLowerCase()) {
+                        case '/setbiz':
+                            if (!payload) {
+                                await sock.sendMessage(remoteJid, { text: '❌ Error: Please provide a business name.' }, { quoted: msg });
+                                break;
+                            }
+                            config.businessName = payload;
+                            await config.save();
+                            await sock.sendMessage(remoteJid, { text: `✅ Business name updated to: *${payload}*` }, { quoted: msg });
+                            break;
+
+                        case '/setprompt':
+                            if (!payload) {
+                                await sock.sendMessage(remoteJid, { text: '❌ Error: Please provide a prompt payload.' }, { quoted: msg });
+                                break;
+                            }
+                            config.aiPrompt = payload;
+                            await config.save();
+                            await sock.sendMessage(remoteJid, { text: `✅ AI Prompt updated successfully! Bot is now instructed with your rules.` }, { quoted: msg });
+                            break;
+
+                        case '/setfallback':
+                            if (!payload) {
+                                await sock.sendMessage(remoteJid, { text: '❌ Error: Please provide a fallback payload.' }, { quoted: msg });
+                                break;
+                            }
+                            config.fallbackMessage = payload;
+                            await config.save();
+                            await sock.sendMessage(remoteJid, { text: `✅ Fallback message updated to: *${payload}*` }, { quoted: msg });
+                            break;
+
+                        case '/setcatalog':
+                            if (!payload) {
+                                await sock.sendMessage(remoteJid, { text: '❌ Error: Please provide your catalog details.' }, { quoted: msg });
+                                break;
+                            }
+                            config.catalogData = payload;
+                            await config.save();
+                            await sock.sendMessage(remoteJid, { text: `✅ Catalog updated successfully! The AI now knows your products and prices.` }, { quoted: msg });
+                            break;
+
+                        case '/status':
+                            const statusMsg = `📊 *Bot Status*\n\n` +
+                                              `*Tenant ID*: ${config.tenantId}\n` +
+                                              `*Active Engine*: ${config.engineMode === 'ai' ? 'Dual-Engine AI' : 'Deterministic'}\n` +
+                                              `*Current AI Prompt*: ${config.aiPrompt}`;
+                            await sock.sendMessage(remoteJid, { text: statusMsg }, { quoted: msg });
+                            break;
+                        
+                        default:
+                            await sock.sendMessage(remoteJid, { text: `❌ Unknown command: ${command}` }, { quoted: msg });
+                            break;
+                    }
+                    
+                    await sock.readMessages([msg.key]);
+                }
+                return; // Owner outgoing messages should not trigger response flow
+            }
+
+            // 3. Check User (Client) Controls (/stop, /start, /resume)
+            if (!msg.key.fromMe) {
+                const lowerText = incomingText.toLowerCase();
+                if (lowerText === '/stop') {
+                    await PausedChat.findOneAndUpdate(
+                        { tenantId, chatJid: remoteJid },
+                        { tenantId, chatJid: remoteJid },
+                        { upsert: true }
+                    );
+                    await sock.sendMessage(remoteJid, { text: '⏸️ The AI agent has been stopped for this discussion. You or the bot owner can explicitly resume it.' }, { quoted: msg });
+                    await sock.readMessages([msg.key]);
+                    return;
+                } else if (lowerText === '/start' || lowerText === '/resume') {
+                    await PausedChat.deleteOne({ tenantId, chatJid: remoteJid });
+                    await sock.sendMessage(remoteJid, { text: '▶️ The AI agent has resumed.' }, { quoted: msg });
+                    await sock.readMessages([msg.key]);
+                    return;
+                }
+
+                // 4. If chat is paused, ignore other messages from the user
+                const isPaused = await PausedChat.findOne({ tenantId, chatJid: remoteJid });
+                if (isPaused) {
+                    console.log(`[Message Interceptor] Chat ${remoteJid} is paused. AI will not respond.`);
+                    return;
+                }
+
+                // 5. Manage Chat Categorization (Business vs Personal)
+                let session = await ChatSession.findOne({ tenantId, chatJid: remoteJid });
+                if (!session) {
+                    session = await ChatSession.create({ tenantId, chatJid: remoteJid, category: 'undetermined' });
+                }
+
+                if (session.category === 'undetermined') {
+                    const lowerInput = incomingText.toLowerCase();
+                    if (lowerInput === '1' || lowerInput.includes('business')) {
+                        await ChatSession.updateOne({ tenantId, chatJid: remoteJid }, { category: 'business' });
+                        const confirmMsg = `Thank you. I will now assist you with your business queries. How can I help you today?`;
+                        await sock.sendMessage(remoteJid, { text: confirmMsg }, { quoted: msg });
+                        await sock.readMessages([msg.key]);
+                        return;
+                    } else if (lowerInput === '2' || lowerInput.includes('personal')) {
+                        await ChatSession.updateOne({ tenantId, chatJid: remoteJid }, { category: 'personal' });
+                        const busyMsg = `This is a personal chat. I am currently busy, but I will get back to you shortly.`;
+                        await sock.sendMessage(remoteJid, { text: busyMsg }, { quoted: msg });
+                        await sock.readMessages([msg.key]);
+                        return;
+                    } else {
+                        // Resend the choice prompt
+                        const displayName = config.businessName || 'AgencyOS';
+                        const selectMsg = `Hi, I am ${displayName} AI agent. 🤖\n\nIs this a business or personal conversation? Please reply with:\n*1* - Business\n*2* - Personal`;
+                        await sock.sendMessage(remoteJid, { text: selectMsg }, { quoted: msg });
+                        await sock.readMessages([msg.key]);
+                        return;
+                    }
+                }
+
+                if (session.category === 'personal') {
+                    console.log(`[Message Interceptor] Chat ${remoteJid} is categorized as personal. Ignoring.`);
+                    return;
+                }
+            }
 
             let responseText = '';
 
@@ -361,7 +473,10 @@ async function initializeBaileysSession(tenantId, phoneNumber = null) {
             
             await sock.readMessages([msg.key]);
             if (responseText && responseText.trim() !== '') {
-                await sock.sendMessage(remoteJid, { text: responseText }, { quoted: msg });
+                const displayName = config.businessName || 'AgencyOS';
+                const stopNotice = `\n\n(Send /stop to stop the AI agent from continuing this discussion)`;
+                const formattedResponse = `Hi, I am ${displayName} AI agent, I can help you with. ${responseText}${stopNotice}`;
+                await sock.sendMessage(remoteJid, { text: formattedResponse }, { quoted: msg });
             }
         } catch (err) {
             console.error('Error handling incoming message:', err);
@@ -395,13 +510,19 @@ app.get('/api/sessions/status/:tenantId', async (req, res) => {
 // 2. Initiate WhatsApp Connection Link
 app.post('/api/sessions/initiate', async (req, res) => {
     try {
-        const { tenantId, phoneNumber, activationCode } = req.body;
+        const { tenantId, phoneNumber, activationCode = 'ACT-TENANT' } = req.body;
         if (!tenantId) return res.status(400).json({ error: 'Tenant ID is required' });
         if (!phoneNumber) return res.status(400).json({ error: 'Phone number is required' });
-        if (!activationCode) return res.status(400).json({ error: 'Activation code is required' });
 
         if (!validateActivationCode(activationCode)) {
             return res.status(400).json({ error: 'Invalid Activation Code. Expected format: ACT-XXXX' });
+        }
+
+        let normalizedPhone = phoneNumber.toString().replace(/\D/g, '');
+        if (normalizedPhone.startsWith('0') && normalizedPhone.length === 10) {
+            normalizedPhone = '254' + normalizedPhone.substring(1);
+        } else if ((normalizedPhone.startsWith('7') || normalizedPhone.startsWith('1')) && normalizedPhone.length === 9) {
+            normalizedPhone = '254' + normalizedPhone;
         }
 
         if (activeSessions.has(tenantId)) {
@@ -413,7 +534,7 @@ app.post('/api/sessions/initiate', async (req, res) => {
             activeSessions.delete(tenantId);
         }
 
-        await initializeBaileysSession(tenantId, phoneNumber);
+        await initializeBaileysSession(tenantId, normalizedPhone);
         res.json({ success: true, message: 'Session initialization triggered. Requesting pairing code.' });
     } catch (error) {
         res.status(500).json({ error: error.message });
