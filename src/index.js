@@ -66,7 +66,8 @@ const PausedChat = mongoose.models.PausedChat || mongoose.model('PausedChat', Pa
 const ChatSessionSchema = new mongoose.Schema({
     tenantId: { type: String, required: true },
     chatJid: { type: String, required: true },
-    category: { type: String, enum: ['undetermined', 'business', 'personal'], default: 'undetermined' }
+    category: { type: String, enum: ['undetermined', 'business', 'personal'], default: 'undetermined' },
+    greeted: { type: Boolean, default: false }
 });
 ChatSessionSchema.index({ tenantId: 1, chatJid: 1 }, { unique: true });
 const ChatSession = mongoose.models.ChatSession || mongoose.model('ChatSession', ChatSessionSchema);
@@ -310,7 +311,7 @@ async function initializeBaileysSession(tenantId, phoneNumber = null) {
 
             // 1. Intercept Categorization Reset Command (accessible by both owner and user)
             if (incomingText.toLowerCase() === '/reset') {
-                await ChatSession.updateOne({ tenantId, chatJid: remoteJid }, { category: 'undetermined' });
+                await ChatSession.updateOne({ tenantId, chatJid: remoteJid }, { category: 'undetermined', greeted: false });
                 const displayName = config.businessName || 'AgencyOS';
                 const resetMsg = `🔄 Conversation categorization has been reset. Please select the category:\n*1* - Business\n*2* - Personal`;
                 await sock.sendMessage(remoteJid, { text: resetMsg });
@@ -435,8 +436,9 @@ async function initializeBaileysSession(tenantId, phoneNumber = null) {
                 if (session.category === 'undetermined') {
                     const lowerInput = incomingText.toLowerCase();
                     if (lowerInput === '1' || lowerInput.includes('business')) {
-                        await ChatSession.updateOne({ tenantId, chatJid: remoteJid }, { category: 'business' });
-                        const confirmMsg = `Thank you. I will now assist you with your business queries. How can I help you today?`;
+                        await ChatSession.updateOne({ tenantId, chatJid: remoteJid }, { category: 'business', greeted: true });
+                        const displayName = config.businessName || 'AgencyOS';
+                        const confirmMsg = `Hi, I am ${displayName} AI agent, I can help you with. How can I help you today?\n\n(Note: You can send /stop at any time to stop this AI agent from continuing this discussion)`;
                         await sock.sendMessage(remoteJid, { text: confirmMsg }, { quoted: msg });
                         await sock.readMessages([msg.key]);
                         return;
@@ -473,9 +475,8 @@ async function initializeBaileysSession(tenantId, phoneNumber = null) {
             
             await sock.readMessages([msg.key]);
             if (responseText && responseText.trim() !== '') {
-                const displayName = config.businessName || 'AgencyOS';
-                const stopNotice = `\n\n(Send /stop to stop the AI agent from continuing this discussion)`;
-                const formattedResponse = `Hi, I am ${displayName} AI agent, I can help you with. ${responseText}${stopNotice}`;
+                // Convert double asterisks to single asterisks for proper WhatsApp bolding
+                const formattedResponse = responseText.replace(/\*\*/g, '*');
                 await sock.sendMessage(remoteJid, { text: formattedResponse }, { quoted: msg });
             }
         } catch (err) {
