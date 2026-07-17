@@ -607,6 +607,25 @@ setInterval(() => {
     });
 }, 5 * 60 * 1000); // 5 minutes
 
+async function autoReconnectActiveSessions() {
+    try {
+        console.log('[Auto-Reconnect] Checking for active bot sessions to restore...');
+        const activeConfigs = await TenantConfig.find({ 
+            botStatus: { $in: ['connected', 'connecting'] } 
+        });
+        
+        console.log(`[Auto-Reconnect] Found ${activeConfigs.length} active sessions to restore.`);
+        for (const config of activeConfigs) {
+            console.log(`[Auto-Reconnect] Restoring session for tenant: ${config.tenantId}`);
+            initializeBaileysSession(config.tenantId).catch(err => {
+                console.error(`[Auto-Reconnect] Failed to restore session for tenant ${config.tenantId}:`, err);
+            });
+        }
+    } catch (err) {
+        console.error('[Auto-Reconnect] Error during auto-reconnection loop:', err);
+    }
+}
+
 // Database and Server Connect (Supporting both MONGODB_URI and MONGO_URI with placeholder fallback)
 let dbUri = process.env.MONGODB_URI || process.env.MONGO_URI || 'mongodb://127.0.0.1:27017/agency-os';
 if (dbUri.includes('<db_username>')) {
@@ -618,6 +637,7 @@ mongoose.connect(dbUri)
         app.listen(PORT, () => {
             console.log(`Agency API engine actively running on port ${PORT}`);
             console.log(`Connected to Database: ${dbUri.substring(0, dbUri.indexOf('@') > -1 ? dbUri.indexOf('@') : 30)}...`);
+            autoReconnectActiveSessions();
         });
     })
     .catch(err => console.error('Database connection crash:', err));
