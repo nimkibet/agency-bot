@@ -178,8 +178,8 @@ app.post('/webhook/pos-event', async (req, res) => {
     }
 
     const payload = req.body;
-    if (!payload || payload.type !== 'INSERT') {
-        return res.status(400).json({ error: 'Invalid or unsupported payload type. Expected INSERT.' });
+    if (!payload || !['INSERT', 'UPDATE'].includes(payload.type)) {
+        return res.status(400).json({ error: 'Invalid or unsupported payload type. Expected INSERT or UPDATE.' });
     }
 
     try {
