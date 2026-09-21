@@ -121,6 +121,24 @@ async function initializeBaileys() {
         } else if (connection === 'open') {
             console.log('Connection opened successfully.');
             currentQR = null;
+            
+            // Auto-fetch groups to display JIDs in console
+            setTimeout(async () => {
+                try {
+                    console.log('Scanning for groups named "Vegas"...');
+                    const groups = await globalSocket.groupFetchAllParticipating();
+                    let found = false;
+                    Object.values(groups).forEach(g => {
+                        if (g.subject.toLowerCase().includes('vegas')) {
+                            console.log(`\n🟢 FOUND GROUP! 🟢\nName: ${g.subject}\nJID:  ${g.id}\nCopy this JID into your .env file!\n`);
+                            found = true;
+                        }
+                    });
+                    if (!found) console.log('No groups with "Vegas" in the name were found.');
+                } catch (err) {
+                    console.error('Failed to fetch groups:', err);
+                }
+            }, 3000);
         }
     });
 }
