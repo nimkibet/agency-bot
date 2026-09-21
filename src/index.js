@@ -6,6 +6,7 @@ require('dotenv').config();
 
 const { makeWASocket, DisconnectReason, initAuthCreds, BufferJSON, proto, fetchLatestBaileysVersion } = require('@whiskeysockets/baileys');
 const pino = require('pino');
+const qrcodeTerminal = require('qrcode-terminal');
 
 const app = express();
 const PORT = process.env.PORT || 5005;
@@ -101,7 +102,9 @@ async function initializeBaileys() {
         
         if (qr) {
             currentQR = qr;
-            console.log('New QR Code generated. Scan it in terminal or visit /api/auth/qr');
+            console.log('\n================== SCAN QR CODE ==================');
+            qrcodeTerminal.generate(qr, { small: true });
+            console.log('==================================================\n');
         }
 
         if (connection === 'close') {
@@ -142,28 +145,6 @@ async function initializeBaileys() {
 }
 
 // --- API ROUTES ---
-
-app.get('/api/auth/qr', (req, res) => {
-    if (!currentQR) {
-        return res.send('No QR code available right now. Either already connected, or generating...');
-    }
-    // Render the QR code using a public API so it can be easily scanned from the browser
-    res.send(`
-        <html>
-        <head>
-            <title>WhatsApp QR</title>
-            <meta name="viewport" content="width=device-width, initial-scale=1">
-        </head>
-        <body style="display:flex; justify-content:center; align-items:center; height:100vh; background-color:#f0f2f5; font-family: sans-serif;">
-            <div style="text-align:center; padding: 2rem; background:white; border-radius:10px; box-shadow:0 4px 6px rgba(0,0,0,0.1);">
-                <h2>Scan to link WhatsApp</h2>
-                <img src="https://api.qrserver.com/v1/create-qr-code/?size=250x250&data=${encodeURIComponent(currentQR)}" alt="QR Code" style="margin-top: 1rem;"/>
-                <p style="margin-top: 1rem; color: #666; font-size: 0.9rem;">Refresh this page if the code expires.</p>
-            </div>
-        </body>
-        </html>
-    `);
-});
 
 app.get('/api/groups', async (req, res) => {
     if (!globalSocket) {
