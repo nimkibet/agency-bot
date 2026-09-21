@@ -4,8 +4,7 @@ const mongoose = require('mongoose');
 const cors = require('cors');
 require('dotenv').config();
 
-const { makeWASocket, DisconnectReason, initAuthCreds, BufferJSON, proto } = require('@whiskeysockets/baileys');
-const { wrapSocket } = require('baileys-antiban');
+const { makeWASocket, DisconnectReason, initAuthCreds, BufferJSON, proto, fetchLatestBaileysVersion } = require('@whiskeysockets/baileys');
 const pino = require('pino');
 
 const app = express();
@@ -81,18 +80,18 @@ async function initializeBaileys() {
     
     const { state, saveCreds } = await useMongoDBAuthState(tenantId);
     
-    const rawSock = makeWASocket({
+    // Fetch latest WhatsApp version to prevent 405 Outdated Client errors
+    const { version, isLatest } = await fetchLatestBaileysVersion();
+    console.log(`Using WhatsApp v${version.join('.')}, isLatest: ${isLatest}`);
+    
+    globalSocket = makeWASocket({
+        version,
         auth: state,
         printQRInTerminal: true,
         logger: pino({ level: 'silent' }),
         syncFullHistory: false,
         generateHighQualityLinkPreviews: false,
         browser: ["Ubuntu", "Chrome", "20.0.04"]
-    });
-
-    globalSocket = wrapSocket(rawSock, {
-        healthMonitoring: true,
-        rampDurationMs: 60000
     });
 
     globalSocket.ev.on('creds.update', saveCreds);
@@ -115,7 +114,7 @@ async function initializeBaileys() {
                 console.log('Database wiped! Restarting node process to generate fresh QR code...');
                 process.exit(1); // Force PM2 to cleanly restart with empty DB
             } else {
-                console.log('Reconnecting gracefully via baileys-antiban...');
+                console.log('Reconnecting gracefully...');
             }
         } else if (connection === 'open') {
             console.log('Connection opened successfully.');
