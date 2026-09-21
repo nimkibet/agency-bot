@@ -5,7 +5,6 @@ const cors = require('cors');
 require('dotenv').config();
 
 const { makeWASocket, DisconnectReason, initAuthCreds, BufferJSON, proto } = require('@whiskeysockets/baileys');
-const { wrapSocket } = require('baileys-antiban');
 const pino = require('pino');
 
 const app = express();
@@ -90,10 +89,7 @@ async function initializeBaileys() {
         browser: ["Ubuntu", "Chrome", "20.0.04"]
     });
 
-    globalSocket = wrapSocket(rawSock, {
-        sessionStability: { enabled: true, healthMonitoring: true },
-        reconnectThrottle: { enabled: true, rampDurationMs: 60_000 }
-    });
+    globalSocket = rawSock;
 
     globalSocket.ev.on('creds.update', saveCreds);
 
