@@ -4,7 +4,7 @@ const mongoose = require('mongoose');
 const cors = require('cors');
 require('dotenv').config();
 
-const { makeWASocket, DisconnectReason, initAuthCreds, BufferJSON, proto, fetchLatestBaileysVersion } = require('@whiskeysockets/baileys');
+const { makeWASocket, DisconnectReason, initAuthCreds, BufferJSON, proto, fetchLatestBaileysVersion, makeCacheableSignalKeyStore } = require('@whiskeysockets/baileys');
 const pino = require('pino');
 const qrcodeTerminal = require('qrcode-terminal');
 
@@ -87,10 +87,14 @@ async function initializeBaileys() {
     
     globalSocket = makeWASocket({
         version,
-        auth: state,
-        printQRInTerminal: true,
+        auth: {
+            creds: state.creds,
+            keys: makeCacheableSignalKeyStore(state.keys, pino({ level: 'silent' }))
+        },
+        printQRInTerminal: false,
         logger: pino({ level: 'silent' }),
         syncFullHistory: false,
+        markOnlineOnConnect: false,
         generateHighQualityLinkPreviews: false,
         browser: ["Ubuntu", "Chrome", "20.0.04"]
     });
@@ -109,15 +113,17 @@ async function initializeBaileys() {
 
         if (connection === 'close') {
             const statusCode = (lastDisconnect?.error)?.output?.statusCode;
-            console.log(`Connection closed. Status: ${statusCode}.`);
+            const isLoggedOut = statusCode === DisconnectReason.loggedOut;
+            console.log(`Connection closed. StatusCode: ${statusCode} | LoggedOut: ${isLoggedOut}`);
             
-            if (statusCode === 405 || statusCode === DisconnectReason.loggedOut) {
-                console.log(`Session corrupt or logged out (Status ${statusCode}). Wiping old data...`);
+            if (isLoggedOut) {
+                console.log(`Device logged out (Status ${statusCode}). Clearing MongoDB auth data...`);
                 await AuthState.deleteMany({ tenantId });
                 console.log('Database wiped! Restarting node process to generate fresh QR code...');
-                process.exit(1); // Force PM2 to cleanly restart with empty DB
+                process.exit(1);
             } else {
-                console.log('Reconnecting gracefully...');
+                console.log('Non-logout disconnect — autonomous reconnect starting in 5s...');
+                setTimeout(initializeBaileys, 5000);
             }
         } else if (connection === 'open') {
             console.log('Connection opened successfully.');
