@@ -13,6 +13,13 @@ const PORT = process.env.PORT || 5005;
 
 app.use(cors());
 app.use(express.json());
+app.use((err, req, res, next) => {
+    if (err instanceof SyntaxError && err.status === 400 && 'body' in err) {
+        console.error('Invalid JSON payload received:', err.message);
+        return res.status(400).json({ error: 'Malformed JSON payload' });
+    }
+    next();
+});
 
 // --- MONGOOSE SCHEMAS ---
 const AuthStateSchema = new mongoose.Schema({
@@ -128,24 +135,6 @@ async function initializeBaileys() {
         } else if (connection === 'open') {
             console.log('Connection opened successfully.');
             currentQR = null;
-            
-            // Auto-fetch groups to display JIDs in console
-            setTimeout(async () => {
-                try {
-                    console.log('Scanning for groups named "Vegas"...');
-                    const groups = await globalSocket.groupFetchAllParticipating();
-                    let found = false;
-                    Object.values(groups).forEach(g => {
-                        if (g.subject.toLowerCase().includes('vegas')) {
-                            console.log(`\n🟢 FOUND GROUP! 🟢\nName: ${g.subject}\nJID:  ${g.id}\nCopy this JID into your .env file!\n`);
-                            found = true;
-                        }
-                    });
-                    if (!found) console.log('No groups with "Vegas" in the name were found.');
-                } catch (err) {
-                    console.error('Failed to fetch groups:', err);
-                }
-            }, 3000);
         }
     });
 }
