@@ -5,6 +5,7 @@ const cors = require('cors');
 require('dotenv').config();
 
 const { makeWASocket, DisconnectReason, initAuthCreds, BufferJSON, proto } = require('@whiskeysockets/baileys');
+const { wrapSocket } = require('baileys-antiban');
 const pino = require('pino');
 
 const app = express();
@@ -89,11 +90,14 @@ async function initializeBaileys() {
         browser: ["Ubuntu", "Chrome", "20.0.04"]
     });
 
-    globalSocket = rawSock;
+    globalSocket = wrapSocket(rawSock, {
+        healthMonitoring: true,
+        rampDurationMs: 60000
+    });
 
     globalSocket.ev.on('creds.update', saveCreds);
 
-    globalSocket.ev.on('connection.update', (update) => {
+    globalSocket.ev.on('connection.update', async (update) => {
         const { connection, lastDisconnect, qr } = update;
         
         if (qr) {
@@ -103,16 +107,15 @@ async function initializeBaileys() {
 
         if (connection === 'close') {
             const statusCode = (lastDisconnect?.error)?.output?.statusCode;
-            const shouldReconnect = statusCode !== DisconnectReason.loggedOut && statusCode !== 405;
-            console.log(`Connection closed. Status: ${statusCode}. Reconnecting: ${shouldReconnect}`);
+            console.log(`Connection closed. Status: ${statusCode}.`);
             
-            if (shouldReconnect) {
-                setTimeout(initializeBaileys, 3000); // 3 second backoff
+            if (statusCode === 405 || statusCode === DisconnectReason.loggedOut) {
+                console.log(`Session corrupt or logged out (Status ${statusCode}). Wiping old data...`);
+                await AuthState.deleteMany({ tenantId });
+                console.log('Database wiped! Restarting node process to generate fresh QR code...');
+                process.exit(1); // Force PM2 to cleanly restart with empty DB
             } else {
-                console.log(`Session invalid or logged out (Status ${statusCode}). Wiping old data for fresh QR code...`);
-                AuthState.deleteMany({ tenantId }).then(() => {
-                    initializeBaileys();
-                });
+                console.log('Reconnecting gracefully via baileys-antiban...');
             }
         } else if (connection === 'open') {
             console.log('Connection opened successfully.');
