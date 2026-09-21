@@ -149,6 +149,27 @@ app.get('/api/auth/qr', (req, res) => {
     `);
 });
 
+app.get('/api/groups', async (req, res) => {
+    if (!globalSocket) {
+        return res.status(503).json({ error: 'WhatsApp socket not initialized' });
+    }
+    try {
+        const groups = await globalSocket.groupFetchAllParticipating();
+        const groupList = Object.values(groups).map(g => ({ id: g.id, name: g.subject }));
+        
+        const searchName = req.query.name;
+        if (searchName) {
+            const filtered = groupList.filter(g => g.name && g.name.toLowerCase().includes(searchName.toLowerCase()));
+            return res.json(filtered);
+        }
+        
+        res.json(groupList);
+    } catch (err) {
+        console.error('Error fetching groups:', err);
+        res.status(500).json({ error: 'Failed to fetch groups' });
+    }
+});
+
 app.post('/webhook/pos-event', async (req, res) => {
     const authHeader = req.headers.authorization;
     if (!authHeader || authHeader !== process.env.WEBHOOK_SECRET) {
