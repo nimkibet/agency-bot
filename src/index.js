@@ -107,13 +107,13 @@ async function initializeBaileys() {
 
         if (connection === 'close') {
             const statusCode = (lastDisconnect?.error)?.output?.statusCode;
-            const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
+            const shouldReconnect = statusCode !== DisconnectReason.loggedOut && statusCode !== 405;
             console.log(`Connection closed. Status: ${statusCode}. Reconnecting: ${shouldReconnect}`);
             
             if (shouldReconnect) {
-                initializeBaileys();
+                setTimeout(initializeBaileys, 3000); // 3 second backoff
             } else {
-                console.log(`Logged out. You will need to re-scan the QR code.`);
+                console.log(`Session invalid or logged out (Status ${statusCode}). Wiping old data for fresh QR code...`);
                 AuthState.deleteMany({ tenantId }).then(() => {
                     initializeBaileys();
                 });
