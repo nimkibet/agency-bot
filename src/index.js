@@ -254,7 +254,7 @@ let dbUri = process.env.MONGODB_URI || process.env.MONGO_URI || 'mongodb://127.0
 mongoose.connect(dbUri)
     .then(() => {
         app.listen(PORT, () => {
-            console.log(\`Webhook bridge listening on port \${PORT}\`);
+            console.log(`Webhook bridge listening on port ${PORT}`);
             initializeBaileys();
         });
     })
