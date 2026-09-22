@@ -188,14 +188,18 @@ app.post('/webhook/pos-event', async (req, res) => {
         let messageText = null;
 
         if (table === 'supplier_transactions') {
+            const supplierName = record.supplier_name || 'Unknown';
+            const totalCost = record.total_cost || 0;
             const cashPaid = record.cash_paid || 0;
             const debtorOffset = record.debtor_offset || 0;
-            const paymentSource = record.payment_source || 'N/A';
+            const paymentSource = record.payment_source || 'Unknown';
             
-            messageText = `📦 *Restock Summary*\n\n` +
-                          `*Cash Paid*: ${cashPaid}\n` +
-                          `*Debtor Offset*: ${debtorOffset}\n` +
-                          `*Payment Source*: ${paymentSource}`;
+            messageText = `📦📦 *Detailed Restock Log*\n` +
+                          `🏪🏪 *Supplier:* ${supplierName}\n` +
+                          `💰💰 *Total Cost:* Ksh ${totalCost}\n` +
+                          `💳💳 *Source:* ${paymentSource}\n` +
+                          `💵💵 *Cash Paid:* Ksh ${cashPaid}\n` +
+                          `📉📉 *Debtor Offset:* Ksh ${debtorOffset}`;
                           
         } else if (table === 'shifts' && record.status === 'CLOSED') {
             const expectedCash = record.expected_cash || 0;
